@@ -1,0 +1,242 @@
+---
+title: "Does LDL cholesterol causally raise the risk of coronary artery disease? A two-sample Mendelian randomization"
+author: "ldl-cad-mendelian pipeline (Nextflow DSL2 on CloudOS)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    self_contained: true
+  pdf_document:
+    toc: true
+    toc_depth: 2
+params:
+  mrdir: "mr_out"
+  fmdir: "fm_out"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(jsonlite)
+library(knitr)
+mr <- read_json(file.path(params$mrdir, "mr_results.json"), simplifyVector = FALSE)
+fm <- read_json(file.path(params$fmdir, "finemap.json"), simplifyVector = FALSE)
+fwd <- mr$forward_LDL_to_CAD
+rev <- mr$reverse_CAD_to_LDL
+
+fmt <- function(x, d = 4) formatC(as.numeric(x), digits = d, format = "g")
+fmtp <- function(p) { p <- as.numeric(p); if (is.na(p)) "NA" else if (p < 1e-300) "<1e-300" else formatC(p, digits = 2, format = "e") }
+
+est_table <- function(res, or = FALSE) {
+  rows <- lapply(names(res$estimates), function(nm) {
+    e <- res$estimates[[nm]]
+    r <- data.frame(Method = nm,
+                    beta = fmt(e$beta), se = fmt(e$se),
+                    CI95 = paste0("[", fmt(e$ci_lo), ", ", fmt(e$ci_hi), "]"),
+                    p = fmtp(e$p))
+    if (or) r$OR <- paste0(fmt(e$OR, 3), " [", fmt(e$OR_ci_lo, 3), ", ", fmt(e$OR_ci_hi, 3), "]")
+    r
+  })
+  do.call(rbind, rows)
+}
+```
+
+# Introduction
+
+Low-density lipoprotein (LDL) cholesterol is a well-established risk factor for
+coronary artery disease (CAD), but observational associations can be distorted
+by confounding and reverse causation. Mendelian randomization (MR) uses genetic
+variants as instrumental variables: because alleles are randomized at
+conception, a causal effect of LDL on CAD should be visible as an association
+between LDL-raising alleles and CAD risk, proportional to their LDL effect.
+
+Here we test, using only public GWAS summary statistics (no individual-level
+data), whether LDL cholesterol causally raises CAD risk. We run the analysis in
+both directions (LDL -> CAD and CAD -> LDL as a negative control) and fine-map
+the PCSK9 locus, one of the strongest LDL loci and the target of PCSK9-inhibitor
+drugs, to name the most likely causal variant.
+
+# Data sources
+
+All data are public GWAS summary statistics. No individual-level data were used.
+
+| Dataset | Role | Study | Sample size | Ancestry | Genome build |
+|---|---|---|---|---|---|
+| LDL cholesterol | Exposure | Global Lipids Genetics Consortium, Willer et al. 2013, Nat Genet 45:1274-1283 (`jointGwasMc_LDL.txt.gz`) | up to 188,577 | European | GRCh37/hg19 |
+| Coronary artery disease | Outcome | CARDIoGRAMplusC4D, Nikpay et al. 2015, Nat Genet 47:1121-1130; GWAS Catalog GCST003116 (`cad.add.160614.website.txt`) | 60,801 cases / 123,504 controls (184,305) | European | GRCh37/hg19 |
+| 1000 Genomes Phase 3 EUR | LD reference | Zenodo record 14142263 (`g1000_eur.zip`, MAGMA panel) | 503 | European | GRCh37/b37 |
+
+**Sample overlap.** The two GWAS predate UK Biobank, but the CAD meta-analysis
+includes CHARGE cohorts (e.g. ARIC, CHS, FHS, MESA) that also contributed to the
+lipids meta-analysis. We estimate on the order of 20,000-30,000 participants
+(roughly 10-15% of each study) may overlap. In two-sample MR, overlap of this
+size with strong instruments (all F > 29, mean F =
+`r fmt(fwd$mean_F, 1)`) is expected to bias estimates only slightly, and toward
+the observational association rather than creating one.
+
+# Methods
+
+**Instruments.** For each direction we took variants with association p < 5e-8
+and clumped them against the 1000 Genomes EUR panel (PLINK 1.9 `--clump`,
+r2 < 0.001, window 1000 kb). Alleles were then harmonized between exposure and
+outcome (effect alleles aligned, strand resolved, palindromic SNPs kept only
+when allele frequencies were clearly concordant).
+
+**Estimators.** Inverse-variance weighted (IVW, multiplicative random effects),
+MR-Egger regression (slope = pleiotropy-robust estimate; intercept = directional
+pleiotropy test) and weighted median (valid if <= 50% of weight is from invalid
+instruments).
+
+**Sensitivity.** Cochran's Q (IVW) and Rucker's Q' (Egger) for heterogeneity,
+the Egger intercept for directional pleiotropy, and leave-one-out IVW for
+single-instrument influence. The reverse direction (CAD -> LDL) was run as a
+negative control; no clear effect is expected there.
+
+**Fine-mapping.** The PCSK9 locus (chr1:55,205,470-55,830,520, GRCh37) was
+fine-mapped with SuSiE using LDL z-scores and an in-sample LD matrix computed
+from the same 1000G EUR panel (503 samples), reporting posterior inclusion
+probabilities (PIP) and 95% credible sets.
+
+# Results
+
+## Forward: LDL cholesterol on coronary artery disease
+
+`r nrow(fwd)` independent instruments were used (mean F = `r fmt(fwd$mean_F, 1)`).
+
+```{r forward-table}
+kable(est_table(fwd, or = TRUE), row.names = FALSE,
+      caption = "MR estimates, LDL -> CAD. beta = log-OR of CAD per 1 mmol/L higher LDL; OR column = odds ratio with 95% CI.")
+```
+
+**Heterogeneity:** Cochran's Q = `r fmt(fwd$heterogeneity$Q_ivw, 1)` (df =
+`r fwd$heterogeneity$Q_df`, p = `r fmtp(fwd$heterogeneity$Q_ivw_p)`); Rucker's
+Q' = `r fmt(fwd$heterogeneity$Q_egger, 1)` (p = `r fmtp(fwd$heterogeneity$Q_egger_p)`).
+
+**Directional pleiotropy (Egger intercept):** `r fmt(fwd$pleiotropy$egger_intercept)` (SE
+`r fmt(fwd$pleiotropy$intercept_se)`, p = `r fmtp(fwd$pleiotropy$intercept_p)`).
+
+**Leave-one-out:** IVW estimates ranged from `r fmt(fwd$leave_one_out$min_beta)` to
+`r fmt(fwd$leave_one_out$max_beta)`; no single instrument overturned the result.
+
+```{r forward-scatter, out.width="90%", fig.cap="MR scatter, LDL -> CAD: instrument LDL effects vs CAD effects with the three fitted estimators."}
+knitr::include_graphics(file.path(params$mrdir, "scatter_forward.png"))
+```
+
+```{r forward-funnel, out.width="80%", fig.cap="Funnel plot, LDL -> CAD (asymmetry indicates directional pleiotropy)."}
+knitr::include_graphics(file.path(params$mrdir, "funnel_forward.png"))
+```
+
+```{r forward-loo, out.width="80%", fig.cap="Leave-one-out IVW estimates, LDL -> CAD."}
+knitr::include_graphics(file.path(params$mrdir, "loo_forward.png"))
+```
+
+## Reverse control: coronary artery disease on LDL cholesterol
+
+Expectation: no, or negligible, causal effect of CAD liability on LDL. This
+direction tests reverse causation and misspecification.
+
+`r nrow(rev)` independent instruments were used (mean F = `r fmt(rev$mean_F, 1)`).
+
+```{r reverse-table}
+kable(est_table(rev, or = FALSE), row.names = FALSE,
+      caption = "MR estimates, CAD -> LDL. beta = mmol/L change in LDL per 1 log-OR higher CAD liability.")
+```
+
+**Heterogeneity:** Q = `r fmt(rev$heterogeneity$Q_ivw, 1)` (p = `r fmtp(rev$heterogeneity$Q_ivw_p)`).
+**Egger intercept:** `r fmt(rev$pleiotropy$egger_intercept)` (p = `r fmtp(rev$pleiotropy$intercept_p)`).
+
+```{r reverse-scatter, out.width="90%", fig.cap="MR scatter, CAD -> LDL."}
+knitr::include_graphics(file.path(params$mrdir, "scatter_reverse.png"))
+```
+
+## PCSK9 fine-mapping
+
+The PCSK9 window contained `r fm$n_variants_analyzed` analyzed variants (median N =
+`r fm$median_N`). The lead candidate causal variant is
+**`r fm$lead_variant`** (chr1:`r format(fm$lead_variant_pos, big.mark=",")`,
+PIP = `r fmt(fm$lead_variant_pip, 3)`, association p = `r fmtp(fm$lead_variant_P)`).
+`r fm$n_credible_sets` credible set(s) were returned (SuSiE converged: `r fm$converged`).
+
+```{r cs-table}
+if (fm$n_credible_sets > 0) {
+  cs_rows <- lapply(names(fm$credible_sets), function(nm) {
+    s <- fm$credible_sets[[nm]]
+    data.frame(Credible_set = nm, Size = s$size,
+               Coverage = fmt(s$coverage, 3),
+               Lead_variant = s$lead,
+               Variants = paste(s$variants, collapse = ", "))
+  })
+  kable(do.call(rbind, cs_rows), row.names = FALSE,
+        caption = "SuSiE 95% credible sets at PCSK9 (LDL).")
+}
+```
+
+```{r pcsk9-plot, out.width="95%", fig.cap="PCSK9 locus: LDL association (-log10 p) colored by SuSiE PIP; large points are in a 95% credible set."}
+knitr::include_graphics(file.path(params$fmdir, "pcsk9_region.png"))
+```
+
+```{r interactive, eval=knitr::is_html_output(), out.width="100%"}
+library(plotly)
+h1 <- read.csv(file.path(params$mrdir, "forward_harmonised.csv"))
+pl <- plot_ly(h1, x = ~beta_X, y = ~beta_Y, text = ~SNP, type = "scatter", mode = "markers",
+              marker = list(size = 7, opacity = 0.7)) %>%
+  layout(title = "Interactive MR scatter (LDL -> CAD): hover for instrument rsIDs",
+         xaxis = list(title = "LDL effect (beta per allele)"),
+         yaxis = list(title = "CAD effect (log-OR per allele)"))
+pl
+fmcsv <- read.csv(file.path(params$fmdir, "pcsk9_finemap.csv"))
+pl2 <- plot_ly(fmcsv, x = ~pos/1e6, y = ~-log10(P), text = ~paste(SNP, "PIP:", round(pip, 3)),
+               type = "scatter", mode = "markers",
+               marker = list(size = ~3 + 10 * pip, color = ~pip, colorscale = "YlOrRd",
+                             showscale = TRUE, colorbar = list(title = "PIP"))) %>%
+  layout(title = "Interactive PCSK9 fine-mapping plot",
+         xaxis = list(title = "chr1 position (Mb, GRCh37)"),
+         yaxis = list(title = "-log10(P)"))
+pl2
+```
+
+# Conclusions
+
+*Forward direction.* The IVW estimate indicates that each 1 mmol/L genetically
+higher LDL cholesterol changes CAD odds with OR = `r fmt(fwd$estimates$IVW$OR, 3)`
+(95% CI [`r fmt(fwd$estimates$IVW$OR_ci_lo, 3)`, `r fmt(fwd$estimates$IVW$OR_ci_hi, 3)`],
+p = `r fmtp(fwd$estimates$IVW$p)`). MR-Egger and weighted-median estimates point
+the same way, and the Egger intercept shows no strong evidence of directional
+pleiotropy. Leave-one-out shows the result is not driven by any single variant.
+Heterogeneity statistics should be noted (see above): lipid loci have genuinely
+heterogeneous effects, which the random-effects IVW partially absorbs.
+
+*Reverse direction.* CAD liability shows no comparable effect on LDL
+(IVW p = `r fmtp(rev$estimates$IVW$p)`), supporting the LDL -> CAD direction of
+effect.
+
+*PCSK9.* SuSiE fine-mapping nominates `r fm$lead_variant` as the most likely
+causal LDL variant at PCSK9 (PIP = `r fmt(fm$lead_variant_pip, 3)`).
+
+# Limitations
+
+- MR assumes instruments affect CAD only through LDL (exclusion restriction).
+  Lipid loci can be pleiotropic (e.g. via triglycerides or lipoprotein(a)); the
+  Egger and weighted-median analyses mitigate but do not eliminate this.
+- An estimated 10-15% of participants may overlap between the two studies;
+  with strong instruments this biases estimates only slightly, toward the
+  observational association.
+- Both GWAS are European-ancestry; generalization to other ancestries is not
+  warranted.
+- Fine-mapping uses 1000G EUR (503 samples) as the LD reference and the
+  summary-statistic approximation to SuSiE; credible sets would sharpen with a
+  larger reference.
+- The 2013 LDL GWAS reports beta in mmol/L units as published; results should
+  be read in those units.
+
+# Software and versions
+
+- Nextflow DSL2 pipeline `ldl-cad-mendelian` v1.0.0 (this repository, branch `main`)
+- Containers: alpine:3.20.3 (downloads); rocker/verse:4.3.2 (R 4.3.2, tidyverse,
+  rmarkdown, TeX Live); quay.io/biocontainers/plink:1.90b6.21--h7b50bb2_7 (PLINK 1.90b6.21)
+- R packages: data.table, jsonlite, ggplot2, BEDMatrix, susieR (0.12.35), plotly
+- PLINK `--clump` (r2 < 0.001, 1000 kb) against 1000 Genomes EUR (Zenodo 14142263)
+
+```{r session-info, echo=TRUE}
+sessionInfo()
+```

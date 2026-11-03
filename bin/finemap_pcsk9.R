@@ -68,8 +68,7 @@ message("Allele coding check: cor(freq_obs, LDL EAF) = ", round(c_test, 3),
 ## Recode to LDL effect-allele (A1) dosage
 D <- Gm
 for (j in seq_along(m$flip)) {
-  if (count
-s_A1) {
+  if (counts_A1) {
     if (m$flip[j]) D[, j] <- 2 - Gm[, j]
   } else {
     if (!m$flip[j]) D[, j] <- 2 - Gm[, j]
